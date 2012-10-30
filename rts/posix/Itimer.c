@@ -26,6 +26,9 @@
 #include "Schedule.h"
 #include "Clock.h"
 
+#define  USE_TIMER_DET 1
+#undef   USE_TIMER_CREATE
+
 /* As recommended in the autoconf manual */
 # ifdef TIME_WITH_SYS_TIME
 #  include <sys/time.h>
@@ -43,6 +46,16 @@
 #endif
 
 #include <string.h>
+
+#if defined(USE_TIMER_DET)
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <perfmon/pfmlib.h>
+#include <perfmon/pfmlib_perf_event.h>
+#endif
 
 /*
  * We use a realtime timer by default.  I found this much more
@@ -87,6 +100,11 @@
 static timer_t timer;
 #endif
 
+#if defined(USE_TIMER_DET)
+static int timer_fd;
+#define DEFAULT_SAMPLE_PERIOD 12000
+#endif
+
 static Time itimer_interval = DEFAULT_TICK_INTERVAL;
 
 static void install_vtalrm_handler(TickProc handle_tick)
@@ -109,18 +127,64 @@ static void install_vtalrm_handler(TickProc handle_tick)
     action.sa_flags = 0;
 #endif
 
+#if defined(USE_TIMER_DET)
+    if (sigaction(SIGIO, &action, NULL) == -1) {
+        sysErrorBelch("sigaction");
+        stg_exit(EXIT_FAILURE);
+    }
+#else
     if (sigaction(ITIMER_SIGNAL, &action, NULL) == -1) {
         sysErrorBelch("sigaction");
         stg_exit(EXIT_FAILURE);
     }
+#endif
 }
 
 void
 initTicker (Time interval, TickProc handle_tick)
 {
     itimer_interval = interval;
-
-#if defined(USE_TIMER_CREATE)
+#if defined(USE_TIMER_DET)
+    {
+        int fd;
+        perf_event_attr_t attr;
+     
+        memset(&attr, 0, sizeof(perf_event_attr_t));
+        attr.type          = PERF_TYPE_HARDWARE;
+        attr.size          = sizeof(perf_event_attr_t);
+        attr.config        = PERF_COUNT_HW_INSTRUCTIONS;
+        attr.sample_period = DEFAULT_SAMPLE_PERIOD;
+        attr.sample_type   = PERF_SAMPLE_IP;
+        attr.read_format   = 0;
+        attr.disabled      = 1;
+        attr.pinned        = 1;
+        attr.wakeup_events = 1;
+     
+        fd = perf_event_open(&attr, 0, -1, -1, 0);
+        if(fd == -1) {
+          sysErrorBelch("initTicker: Failed to open event");
+          stg_exit(EXIT_FAILURE);
+        }
+        if(mmap(NULL, 8192, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0)
+            == MAP_FAILED) {
+          sysErrorBelch("initTicker: Failed to mmap");
+          stg_exit(EXIT_FAILURE);
+        }
+        if(fcntl(fd, F_SETFL , O_RDWR|O_NONBLOCK|O_ASYNC) == -1) {
+          sysErrorBelch("initTicker: fcntl F_SETFL failed");
+          stg_exit(EXIT_FAILURE);
+        }
+        if(fcntl(fd, F_SETOWN, getpid()) == -1) {
+          sysErrorBelch("initTicker: fcntl F_SETOWN failed");
+          stg_exit(EXIT_FAILURE);
+        }
+        if(ioctl(fd, PERF_EVENT_IOC_RESET,0) == -1) {
+          sysErrorBelch("timer_settime: ioctl reset PMUfailed");
+          stg_exit(EXIT_FAILURE);
+        }
+        timer_fd = fd;
+    }
+#elif defined(USE_TIMER_CREATE)
     {
         struct sigevent ev;
 
@@ -143,7 +207,18 @@ initTicker (Time interval, TickProc handle_tick)
 void
 startTicker(void)
 {
-#if defined(USE_TIMER_CREATE)
+#if defined(USE_TIMER_DET)
+    {
+       if(ioctl(timer_fd, PERF_EVENT_IOC_RESET,0) == -1) {
+         sysErrorBelch("startTicker: ioctl resetting PMU failed\n");
+         stg_exit(EXIT_FAILURE);
+       }
+       if(ioctl(timer_fd, PERF_EVENT_IOC_ENABLE,0) == -1) {
+         sysErrorBelch("startTicker: ioctl enabling PMU failed\n");
+         stg_exit(EXIT_FAILURE);
+       }
+    }
+#elif defined(USE_TIMER_CREATE)
     {
         struct itimerspec it;
         
@@ -175,7 +250,14 @@ startTicker(void)
 void
 stopTicker(void)
 {
-#if defined(USE_TIMER_CREATE)
+#if defined(USE_TIMER_DET)
+    {
+       if(ioctl(timer_fd, PERF_EVENT_IOC_DISABLE,0) == -1) {
+         sysErrorBelch("stopTicker: ioctl disabling PMU failed\n");
+         stg_exit(EXIT_FAILURE);
+       }
+    }
+#elif defined(USE_TIMER_CREATE)
     struct itimerspec it;
 
     it.it_value.tv_sec = 0;
