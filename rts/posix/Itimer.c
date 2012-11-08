@@ -26,6 +26,7 @@
 #include "Schedule.h"
 #include "Clock.h"
 
+//XXX: Giant hack to enable deterministic instruction-based scheduler
 #define  USE_TIMER_DET 1
 #undef   USE_TIMER_CREATE
 
@@ -102,7 +103,7 @@ static timer_t timer;
 
 #if defined(USE_TIMER_DET)
 static int timer_fd;
-#define DEFAULT_SAMPLE_PERIOD 12000
+#define DEFAULT_SAMPLE_PERIOD 2400000ULL
 #endif
 
 static Time itimer_interval = DEFAULT_TICK_INTERVAL;
@@ -209,10 +210,8 @@ startTicker(void)
 {
 #if defined(USE_TIMER_DET)
     {
-       if(ioctl(timer_fd, PERF_EVENT_IOC_RESET,0) == -1) {
-         sysErrorBelch("startTicker: ioctl resetting PMU failed\n");
-         stg_exit(EXIT_FAILURE);
-       }
+       //TODO: May want to reset ticker
+       // resetTicker();
        if(ioctl(timer_fd, PERF_EVENT_IOC_ENABLE,0) == -1) {
          sysErrorBelch("startTicker: ioctl enabling PMU failed\n");
          stg_exit(EXIT_FAILURE);
@@ -244,6 +243,18 @@ startTicker(void)
             stg_exit(EXIT_FAILURE);
         }
     }
+#endif
+}
+
+void resetTicker(void)
+{
+#if defined(USE_TIMER_DET)
+  {
+    if(ioctl(timer_fd, PERF_EVENT_IOC_RESET,0) == -1) {
+      sysErrorBelch("startTicker: ioctl resetting PMU failed\n");
+      stg_exit(EXIT_FAILURE);
+    }
+  }
 #endif
 }
 

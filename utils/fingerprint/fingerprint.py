@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/python2.7
 # Script to create and restore a git fingerprint of the ghc repositories.
 
 from   datetime   import datetime
